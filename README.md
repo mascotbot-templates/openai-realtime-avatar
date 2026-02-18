@@ -2,6 +2,8 @@
 
 > Real-time animated avatar with OpenAI Realtime API and Mascot Bot SDK lip sync.
 
+![OpenAI Realtime Avatar Demo](https://mascotbot-app.s3.amazonaws.com/rive-assets/og_images/og_gemini_liveapi.jpg)
+
 ## What This Demonstrates
 
 - **Real-time lip sync** — frame-accurate viseme synchronization with OpenAI audio responses
