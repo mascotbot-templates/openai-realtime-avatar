@@ -145,7 +145,7 @@ const mascotUrl = "/mascot.riv"; // or a CDN URL
 - [Mascot Bot Documentation](https://docs.mascot.bot)
 - [OpenAI Realtime API Guide](https://platform.openai.com/docs/guides/realtime)
 - [OpenAI API Keys](https://platform.openai.com/api-keys)
-- [Support](mailto:support@mascot.bot) | [Discord](https://discord.gg/SBxfyPXD)
+- [Support](mailto:support@mascot.bot)
 
 ## License
 
