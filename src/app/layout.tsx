@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { Providers } from "./providers";
 
 export const metadata: Metadata = {
-  title: "OpenAI Realtime Avatar Demo - Mascot Bot SDK",
-  description: "Open-source example demonstrating OpenAI Realtime API integration with Mascot Bot SDK for real-time animated avatars with lip sync",
+  title: "OpenAI Realtime Avatar Demo - MascotBot SDK",
+  description:
+    "Open-source example: OpenAI Realtime API (WebRTC) with the MascotBot lipsync SDK for real-time animated avatars",
 };
 
 export default function RootLayout({
@@ -14,7 +16,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="antialiased">
-        {children}
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

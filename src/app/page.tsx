@@ -1,90 +1,71 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useMascot,
+  createElementTap,
+  type ElementTap,
+} from "@mascotbot/react";
 import {
   Alignment,
   Fit,
-  MascotClient,
-  MascotProvider,
+  Mascot,
   MascotRive,
-  OpenAIRealtimeSession,
-  useMascotOpenAI,
-} from "@mascotbot-sdk/react";
-import { OpenAIRealtimeWebSocket } from "@openai/agents-realtime";
-import { WavRecorder } from "wavtools";
+  useMascotPlayback,
+  useLipsyncStream,
+} from "@mascotbot/react/rive";
 
-// Stable config object — must NOT be recreated on every render
-// or MascotPlayback gets destroyed and recreated, killing active lip sync
+type CallState = "disconnected" | "connecting" | "connected";
+
+/**
+ * Natural-lip-sync preset — a STABLE module constant. A fresh object every
+ * render reinitializes the post-processor and breaks lip sync after the
+ * first audio chunk (the single most common integration bug).
+ */
 const NATURAL_LIP_SYNC_CONFIG = {
-  minVisemeInterval: 40,
-  mergeWindow: 60,
-  keyVisemePreference: 0.6,
+  minVisemeInterval: 60,
+  mergeWindow: 80,
+  keyVisemePreference: 0.7,
   preserveSilence: true,
-  similarityThreshold: 0.4,
+  similarityThreshold: 0.6,
   preserveCriticalVisemes: true,
-  criticalVisemeMinDuration: 80,
-  desktopTransitionDuration: 18,
-  mobileTransitionDuration: 22,
 } as const;
 
-interface SignedUrlConfig {
-  signedUrl: string;
-  model: string;
-}
-
-async function fetchConfig(): Promise<SignedUrlConfig> {
-  const res = await fetch(`/api/get-signed-url-openai?t=${Date.now()}`, {
-    cache: "no-store",
-    headers: { "Cache-Control": "no-cache" },
-  });
-  if (!res.ok) throw new Error(`Failed to get signed url: ${res.statusText}`);
-  return res.json();
+/** Minimal shape of the dynamically-imported @openai/agents-realtime session. */
+interface RealtimeSessionLike {
+  close: () => void;
+  mute: (muted: boolean) => void;
 }
 
 function OpenAIRealtimeContent() {
-  const [sessionStatus, setSessionStatus] =
-    useState<OpenAIRealtimeSession["status"]>("disconnected");
+  // ── Co-located lip-sync pipeline (the demo's RealtimePanel shape) ──
+  // OpenAI Realtime over WebRTC self-plays the agent voice through an
+  // <audio> element we supply. We tap that element cross-browser with
+  // createElementTap(); the SDK computes visemes locally from the tapped
+  // stream. WebRTC self-plays — never route it through
+  // createPCMStreamPlayer (that is WebSocket-only and double-plays voice).
+  const { client, status } = useMascot();
+  const playback = useMascotPlayback({
+    stream: true,
+    enableNaturalLipSync: true,
+    naturalLipSyncConfig: NATURAL_LIP_SYNC_CONFIG,
+  });
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  useLipsyncStream({
+    client,
+    playback,
+    source: { kind: "mediaStream", stream },
+  });
+
+  const [callState, setCallState] = useState<CallState>("disconnected");
   const [isMuted, setIsMuted] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
 
-  const transportRef = useRef<OpenAIRealtimeWebSocket | null>(null);
-  const recorderRef = useRef<WavRecorder | null>(null);
-  const configRef = useRef<SignedUrlConfig | null>(null);
-  const refreshTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const sessionRef = useRef<RealtimeSessionLike | null>(null);
+  const elTapRef = useRef<ElementTap | null>(null);
+  const teardownRef = useRef<null | (() => void)>(null);
 
-  // Memoize session object to prevent unnecessary re-renders
-  const session = useMemo(
-    () => ({ status: sessionStatus }),
-    [sessionStatus]
-  );
-
-  // Core integration hook — intercepts WebSocket and handles lip-sync + audio playback
-  const { isIntercepting, messageCount } = useMascotOpenAI({
-    session,
-    debug: false,
-    naturalLipSync: true,
-    naturalLipSyncConfig: NATURAL_LIP_SYNC_CONFIG,
-  });
-
-  // Pre-fetch and periodically refresh signed URL config (10-min expiry)
-  const refreshConfig = useCallback(async () => {
-    try {
-      configRef.current = await fetchConfig();
-    } catch (err) {
-      console.error("[OpenAIRealtime] Config fetch failed:", err);
-      configRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => {
-    refreshConfig();
-    refreshTimerRef.current = setInterval(refreshConfig, 9 * 60 * 1000);
-    return () => {
-      if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
-    };
-  }, [refreshConfig]);
-
-  // Mobile detection
+  // Mobile detection (scales the avatar to fill small viewports)
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 768);
     check();
@@ -92,90 +73,114 @@ function OpenAIRealtimeContent() {
     return () => window.removeEventListener("resize", check);
   }, []);
 
-  // --- Connection lifecycle ---
-
-  const startConversation = useCallback(async () => {
+  // ── Full teardown — runs on every end path ──
+  const teardown = useCallback(() => {
+    teardownRef.current?.();
+    teardownRef.current = null;
+    elTapRef.current?.close();
+    elTapRef.current = null;
     try {
-      setSessionStatus("connecting");
-
-      const config = configRef.current ?? (await fetchConfig());
-      if (!config?.signedUrl) throw new Error("No signed URL");
-
-      // SDK transport → our proxy
-      // Use createWebSocket factory so the WebSocket goes through
-      // the intercepted window.WebSocket (for mascot lip-sync)
-      const transport = new OpenAIRealtimeWebSocket({
-        model: config.model,
-        apiKey: "proxy",
-        useInsecureApiKey: true,
-        // Browser WebSocket is used at runtime; cast needed because SDK types expect Node ws
-        createWebSocket: async (_options: { url: string; apiKey: string }) =>
-          new WebSocket(config.signedUrl) as any,
-      });
-      transportRef.current = transport;
-
-      transport.on("connection_change", (status) => {
-        if (status === "connected") {
-          setSessionStatus("connected");
-        } else if (status === "disconnected") {
-          setSessionStatus("disconnected");
-          recorderRef.current?.end().catch(() => {});
-          recorderRef.current = null;
-          refreshConfig();
-        }
-      });
-
-      transport.on("error", (err) =>
-        console.error("[OpenAIRealtime] SDK error:", err)
-      );
-
-      // Config (instructions, voice, VAD) is locked in the ephemeral token
-      // created server-side — no session.update needed from the client
-      await transport.connect({
-        apiKey: "proxy",
-      });
-
-      // Mic capture via WavRecorder (24 kHz PCM16 — what OpenAI expects)
-      const recorder = new WavRecorder({ sampleRate: 24000 });
-      recorderRef.current = recorder;
-      await recorder.begin();
-      await recorder.record((data) => {
-        if (transportRef.current?.status === "connected") {
-          transportRef.current.sendAudio(data.mono as any);
-        }
-      });
-    } catch (err) {
-      console.error("[OpenAIRealtime] Failed to start:", err);
-      setSessionStatus("disconnected");
-      refreshConfig();
+      sessionRef.current?.close();
+    } catch {
+      /* already closed */
     }
-  }, [refreshConfig]);
-
-  const stopConversation = useCallback(async () => {
-    transportRef.current?.close();
-    transportRef.current = null;
-    await recorderRef.current?.end().catch(() => {});
-    recorderRef.current = null;
+    sessionRef.current = null;
+    setStream(null); // detaches the worklet from the shared client
   }, []);
 
-  const toggleMute = useCallback(async () => {
-    const recorder = recorderRef.current;
-    if (!recorder) return;
+  // Stabilise the unmount cleanup (see react-website-demo bug: teardown
+  // identity can flip per render and re-fire endSession mid-call).
+  const teardownActionRef = useRef(teardown);
+  teardownActionRef.current = teardown;
+  useEffect(() => () => teardownActionRef.current?.(), []);
 
-    if (isMuted) {
-      await recorder.record((data) => {
-        if (transportRef.current?.status === "connected") {
-          transportRef.current.sendAudio(data.mono as any);
-        }
+  const startConversation = useCallback(async () => {
+    if (status !== "ready" || callState !== "disconnected") return;
+    try {
+      setCallState("connecting");
+
+      // 1. SYNCHRONOUSLY in the click, before any await: create the tap
+      //    (AudioContext born running so it isn't auto-suspended).
+      const tap = createElementTap();
+      elTapRef.current = tap;
+      setStream(tap.stream);
+
+      // 2. Mint a fresh single-use client secret server-side. The standing
+      //    OPENAI_API_KEY never reaches the browser.
+      const tokenRes = await fetch("/api/openai/token", {
+        method: "POST",
+        cache: "no-store",
       });
-    } else {
-      await recorder.pause();
+      if (!tokenRes.ok) throw new Error(`token ${tokenRes.status}`);
+      const { clientSecret } = (await tokenRes.json()) as {
+        clientSecret: string;
+      };
+      if (!clientSecret) throw new Error("client secret missing");
+
+      // 3. Build the WebRTC session. We supply our own <audio> element so
+      //    createElementTap() can tap the self-played agent voice. In
+      //    @openai/agents-realtime 0.4.x audioElement is a WebRTC
+      //    transport option, so construct the transport explicitly.
+      const { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebRTC } =
+        await import("@openai/agents-realtime");
+
+      const audioEl = new Audio();
+      audioEl.autoplay = true;
+
+      const agent = new RealtimeAgent({
+        name: "Assistant",
+        instructions: "Keep replies short and conversational.",
+      });
+      const transport = new OpenAIRealtimeWebRTC({ audioElement: audioEl });
+      const session = new RealtimeSession(agent, { transport });
+
+      session.on("error", (err: unknown) =>
+        console.error("[OpenAIRealtime] session error:", err),
+      );
+
+      await session.connect({ apiKey: clientSecret });
+      sessionRef.current = session as unknown as RealtimeSessionLike;
+
+      // 4. Tap the self-playing element cross-browser (Safari has no
+      //    captureStream). tap.stream is stable + silent until attach.
+      tap.attach(audioEl);
+      tap.resume();
+
+      teardownRef.current = () => {
+        audioEl.pause();
+        audioEl.srcObject = null;
+      };
+
+      setCallState("connected");
+    } catch (error) {
+      console.error("[OpenAIRealtime] Failed to start:", error);
+      teardown();
+      setCallState("disconnected");
     }
-    setIsMuted((prev) => !prev);
+  }, [status, callState, teardown]);
+
+  const stopConversation = useCallback(() => {
+    teardown();
+    setIsMuted(false);
+    setCallState("disconnected");
+  }, [teardown]);
+
+  const toggleMute = useCallback(() => {
+    const session = sessionRef.current;
+    if (!session) return;
+    const next = !isMuted;
+    try {
+      session.mute(next);
+    } catch (e) {
+      console.error("[OpenAIRealtime] mute failed:", e);
+      return;
+    }
+    setIsMuted(next);
   }, [isMuted]);
 
-  const isConnecting = sessionStatus === "connecting";
-  const isConnected = sessionStatus === "connected";
+  const isConnecting = callState === "connecting";
+  const isConnected = callState === "connected";
+  const sdkLoading = status !== "ready";
 
   return (
     <div className="fixed inset-0 bg-gradient-to-br from-[#0d1117] to-[#1a2332] overflow-hidden">
@@ -209,9 +214,9 @@ function OpenAIRealtimeContent() {
           />
 
           {/* Status indicator */}
-          {isIntercepting && (
+          {isConnected && (
             <div className="absolute top-4 right-4 text-white/60 text-sm z-20">
-              Messages: {messageCount}
+              {stream ? "lip-sync attached" : "connected"}
             </div>
           )}
 
@@ -220,10 +225,14 @@ function OpenAIRealtimeContent() {
             {!isConnected ? (
               <button
                 onClick={startConversation}
-                disabled={isConnecting}
+                disabled={isConnecting || sdkLoading}
                 className="inline-flex items-center justify-center gap-x-2.5 h-16 px-8 text-lg rounded-lg bg-gradient-to-r from-[#10a37f] to-[#0d8c6d] text-white hover:from-[#0d8c6d] hover:to-[#0a755a] disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg"
               >
-                {isConnecting ? "Connecting..." : "Start Call"}
+                {sdkLoading
+                  ? "Loading SDK…"
+                  : isConnecting
+                    ? "Connecting..."
+                    : "Start Call"}
               </button>
             ) : (
               <>
@@ -253,24 +262,22 @@ function OpenAIRealtimeContent() {
 }
 
 export default function Home() {
-  // Add your mascot .riv file to the public folder
-  // Available with Mascot Bot SDK subscription
-  const mascotUrl = "/mascot.riv";
-
+  // The notion-guy avatar is auto-downloaded to /public by the
+  // fetch-avatars script (predev / prebuild). It uses the "Character"
+  // artboard + the "InLesson" state machine.
   return (
-    <MascotProvider>
-      <main className="flex h-svh flex-col bg-[#080808] overflow-hidden">
-        <MascotClient
-          src={mascotUrl}
-          inputs={["is_speaking", "gesture", "character"]}
+          <main className="flex h-svh flex-col bg-[#080808] overflow-hidden">
+        <Mascot
+          src="/mascot.riv"
+          artboard="Character"
+          stateMachine="InLesson"
           layout={{
             fit: Fit.Contain,
             alignment: Alignment.Center,
           }}
         >
           <OpenAIRealtimeContent />
-        </MascotClient>
+        </Mascot>
       </main>
-    </MascotProvider>
   );
 }

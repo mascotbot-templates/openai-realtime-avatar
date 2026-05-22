@@ -1,30 +1,35 @@
 {
   "name": "openai-realtime-avatar",
-  "version": "1.0.0",
-  "description": "Open-source example demonstrating OpenAI Realtime API integration with Mascot Bot SDK for real-time animated avatars with lip sync",
+  "version": "2.0.0",
+  "description": "Open-source example: OpenAI Realtime API (WebRTC) with the MascotBot lipsync SDK (client-side viseme inference) for a real-time animated avatar",
   "private": true,
   "scripts": {
+    "fetch-avatars": "node scripts/fetch-avatars.mjs",
+    "predev": "node scripts/fetch-avatars.mjs",
     "dev": "next dev",
+    "prebuild": "node scripts/fetch-avatars.mjs",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@openai/agents-realtime": "^0.4.15",
+    "@rive-app/react-webgl2": "4.28.4",
+    "@rive-app/webgl2": "2.37.6",
+    "next": "15.5.9",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "next": "15.5.9",
-    "@openai/agents-realtime": "^0.4.10",
-    "wavtools": "^0.1.2",
-    "@rive-app/react-webgl2": "^4.21.1",
-    "@mascotbot-sdk/react": "file:./mascotbot-sdk-react-0.1.8.tgz"
+    "@mascotbot/core": "0.3.0",
+    "@mascotbot/react": "0.3.0"
   },
   "devDependencies": {
-    "typescript": "^5",
     "@types/node": "^20",
-    "@types/react": "^18",
-    "@types/react-dom": "^18",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "autoprefixer": "^10.4.16",
     "postcss": "^8.4.31",
     "tailwindcss": "^3.3.0",
-    "autoprefixer": "^10.4.16"
+    "typescript": "^5"
   }
 }
